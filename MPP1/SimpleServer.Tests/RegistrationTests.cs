@@ -3,6 +3,7 @@ using TestLib.attributes;
 using SimpleServer;
 using SimpleServer.Core;
 using SimpleServer.Http;
+using TestLib.exceptions;
 
 namespace SimpleServer.Tests;
 

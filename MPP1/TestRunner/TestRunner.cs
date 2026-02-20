@@ -6,6 +6,11 @@ namespace TestRunner;
 
 public class TestRunner
 {
+    private const ConsoleColor SuccessColor = ConsoleColor.Green;
+    private const ConsoleColor TestErrorColor = ConsoleColor.Red;
+    private const ConsoleColor CriticalErrorColor = ConsoleColor.DarkRed;
+    private const ConsoleColor IgnoreColor = ConsoleColor.Cyan;
+    
     private int _passed;
     private int _failed;
     private int _ignored;
@@ -27,8 +32,6 @@ public class TestRunner
 
         PrintSummary();
     }
-
-    // -------------------- Shared Context --------------------
 
     private async Task<object?> InitializeSharedContext(Assembly assembly)
     {
@@ -62,8 +65,6 @@ public class TestRunner
             await InvokeMethod(sharedInstance, cleanupMethod);
     }
 
-    // -------------------- Test Class --------------------
-
     private async Task ExecuteTestClass(Type testClass, object? sharedInstance)
     {
         var classInit = testClass.GetMethods()
@@ -89,8 +90,6 @@ public class TestRunner
             await InvokeMethod(classInstanceForInit, classCleanup);
     }
 
-    // -------------------- Test Method --------------------
-
     private async Task ExecuteTestMethod(Type testClass, MethodInfo method, object? sharedInstance)
     {
         var dataRows = method.GetCustomAttributes<DataRowAttribute>().ToList();
@@ -106,6 +105,7 @@ public class TestRunner
                 if (!string.IsNullOrWhiteSpace(row.IgnoreMessage))
                 {
                     _ignored++;
+                    PrintIgnore(message: row.IgnoreMessage, methodName: method.Name);
                     continue;
                 }
 
@@ -132,22 +132,26 @@ public class TestRunner
             await InvokeMethod(instance, method, parameters);
 
             _passed++;
+            PrintSuccess();
             Console.WriteLine($"PASS: {method.DeclaringType?.Name}.{method.Name}");
         }
         catch (TestFailedException ex)
         {
             _failed++;
-            Console.WriteLine($"FAIL: {method.Name} -> {ex.Message}");
+            PrintFail(message: ex.Message, methodName: method.Name);
+            //Console.WriteLine($"FAIL: {method.Name} -> {ex.Message}");
         }
         catch (TestIgnoredException ex)
         {
             _ignored++;
-            Console.WriteLine($"IGNORED: {method.Name} -> {ex.Message}");
+            PrintIgnore(message: ex.Message, methodName: method.Name);
+            //Console.WriteLine($"IGNORED: {method.Name} -> {ex.Message}");
         }
         catch (Exception ex)
         {
             _errors++;
-            Console.WriteLine($"ERROR: {method.Name} -> {ex.InnerException?.Message ?? ex.Message}");
+            PrintCriticalError(message: ex.InnerException?.Message ?? ex.Message, methodName: method.Name);
+            //Console.WriteLine($"ERROR: {method.Name} -> {ex.InnerException?.Message ?? ex.Message}");
         }
         finally
         {
@@ -155,8 +159,6 @@ public class TestRunner
                 await InvokeMethod(instance, teardown);
         }
     }
-
-    // -------------------- Helpers --------------------
 
     private object? CreateInstance(Type testClass, object? sharedInstance)
     {
@@ -180,6 +182,41 @@ public class TestRunner
 
         if (result is Task task)
             await task;
+    }
+    
+    private void PrintSuccess(string? message = "PASSED")
+    {
+        var prevColor = Console.ForegroundColor;
+        Console.ForegroundColor = SuccessColor;
+        Console.Write(message + ": ");
+        Console.ForegroundColor = prevColor;
+    }
+
+    private void PrintCriticalError(string methodName, string message)
+    {
+        var prevColor = Console.ForegroundColor;
+        Console.ForegroundColor = CriticalErrorColor;
+        Console.Write($"ERROR: ");
+        Console.ForegroundColor = prevColor;
+        Console.WriteLine(methodName + " " + message);
+    }
+    
+    private void PrintIgnore(string methodName, string message)
+    {
+        var prevColor = Console.ForegroundColor;
+        Console.ForegroundColor = IgnoreColor;
+        Console.Write($"SKIPPED: ");
+        Console.ForegroundColor = prevColor;
+        Console.WriteLine(methodName + " " + message);
+    }
+
+    private void PrintFail(string methodName, string message)
+    {
+        var prevColor = Console.ForegroundColor;
+        Console.ForegroundColor = TestErrorColor;
+        Console.Write($"FAILED: ");
+        Console.ForegroundColor = prevColor;
+        Console.WriteLine(methodName + " " + message);
     }
 
     private void PrintSummary()

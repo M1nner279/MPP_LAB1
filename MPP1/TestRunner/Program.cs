@@ -10,4 +10,4 @@ if (!File.Exists(assemblyPath))
 
 var assembly = Assembly.LoadFrom(assemblyPath);
 var runner = new TestRunner.TestRunner();
-runner.RunAsync(assembly);
+await runner.RunAsync(assembly);
