@@ -1,0 +1,48 @@
+﻿using TestLib;
+using TestLib.attributes;
+using SimpleServer;
+using SimpleServer.Core;
+using SimpleServer.Http;
+
+namespace SimpleServer.Tests;
+
+[TestClass]
+public class RegistrationTests
+{
+    private SimpleHttpServer _server = null!;
+
+    [SetUp]
+    public void Setup()
+    {
+        _server = new SimpleHttpServer();
+    }
+
+    [TearDown]
+    public void TearDown()
+    {
+        Assert.IsNotNull(_server);
+    }
+
+    [TestMethod]
+    public void DuplicateRoute_Throws()
+    {
+        _server.Register("/test", _ =>
+            Task.FromResult(new HttpResponse()));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            _server.Register("/test", _ =>
+                Task.FromResult(new HttpResponse())));
+    }
+
+    [TestMethod]
+    public void RouteCount_Increases()
+    {
+        Assert.AreEqual(0, _server.RouteCount);
+
+        _server.Register("/a", _ =>
+            Task.FromResult(new HttpResponse()));
+
+        Assert.AreEqual(1, _server.RouteCount);
+        Assert.IsTrue(_server.RouteCount > 0);
+    }
+}

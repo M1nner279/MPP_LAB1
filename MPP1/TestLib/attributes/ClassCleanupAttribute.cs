@@ -1,4 +1,4 @@
 ﻿namespace TestLib.attributes;
 
 [AttributeUsage(AttributeTargets.Class)]
-public sealed class TestClassAttribute : Attribute { }
+public sealed class ClassCleanupAttribute : Attribute { }

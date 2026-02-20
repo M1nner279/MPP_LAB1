@@ -1,4 +1,8 @@
 ﻿namespace TestLib.attributes;
 
 [AttributeUsage(AttributeTargets.Method)]
-public class TestMethodAttribute : Attribute { }
+public sealed class TestMethodAttribute : Attribute
+{
+    public string? DisplayName { get; set; }
+    public int TimeoutMilliseconds { get; set; }
+}
