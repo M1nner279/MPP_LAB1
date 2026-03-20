@@ -9,18 +9,29 @@ namespace SimpleServer.Tests;
 [TestClass]
 public class DataRowTests
 {
+    private SimpleHttpServer _server = null!;
+    private int setupCalls = 0;
+    
+    [SetUp]
+    public void Setup()
+    {
+        _server = new SimpleHttpServer();
+        setupCalls++;
+    }
+    
     [TestMethod]
-    [DataRow("/a", 404)]
+    [DataRow("/a", 200)] // test validation param
     [DataRow("/b", 404)]
     public async Task UnknownRoutes_Return404(string path, int expected)
     {
-        var server = new SimpleHttpServer();
+        //var server = new SimpleHttpServer();
 
-        var response = await server.RouteAsync(
+        var response = await _server.RouteAsync(
             new HttpRequest("GET", path));
 
         Assert.AreEqual(expected, response.StatusCode);
         Assert.IsFalse(response.StatusCode == 200);
+        Console.WriteLine(setupCalls);
     }
 
     [TestMethod]

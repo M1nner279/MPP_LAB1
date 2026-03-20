@@ -25,6 +25,6 @@ public class TestServerContext
     [SharedContextCleanup]
     public void Cleanup()
     {
-        // логика очистки при необходимости
+        
     }
 }

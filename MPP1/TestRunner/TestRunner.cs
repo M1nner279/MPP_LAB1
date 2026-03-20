@@ -6,11 +6,6 @@ namespace TestRunner;
 
 public class TestRunner
 {
-    private const ConsoleColor SuccessColor = ConsoleColor.Green;
-    private const ConsoleColor TestErrorColor = ConsoleColor.Red;
-    private const ConsoleColor CriticalErrorColor = ConsoleColor.DarkRed;
-    private const ConsoleColor IgnoreColor = ConsoleColor.Cyan;
-    
     private int _passed;
     private int _failed;
     private int _ignored;
@@ -18,211 +13,231 @@ public class TestRunner
 
     public async Task RunAsync(Assembly assembly)
     {
-        object? sharedInstance = await InitializeSharedContext(assembly);
+        var sharedContext = await CreateSharedContext(assembly);
 
-        var testClasses = assembly.GetTypes()
-            .Where(t => t.GetCustomAttribute<TestClassAttribute>() != null);
+        var testClasses = DiscoverTestClasses(assembly);
 
         foreach (var testClass in testClasses)
         {
-            await ExecuteTestClass(testClass, sharedInstance);
+            await RunTestClass(testClass, sharedContext);
         }
 
-        await CleanupSharedContext(sharedInstance);
+        await DisposeSharedContext(sharedContext);
 
         PrintSummary();
     }
 
-    private async Task<object?> InitializeSharedContext(Assembly assembly)
+    // ---------------- DISCOVERY ----------------
+
+    private IEnumerable<Type> DiscoverTestClasses(Assembly assembly)
     {
-        var sharedType = assembly.GetTypes()
+        return assembly.GetTypes()
+            .Where(t => t.GetCustomAttribute<TestClassAttribute>() != null);
+    }
+
+    // ---------------- SHARED CONTEXT ----------------
+
+    private async Task<object?> CreateSharedContext(Assembly assembly)
+    {
+        var type = assembly.GetTypes()
             .FirstOrDefault(t => t.GetCustomAttribute<SharedContextAttribute>() != null);
 
-        if (sharedType == null)
+        if (type == null)
             return null;
 
-        var instance = Activator.CreateInstance(sharedType);
+        var instance = Activator.CreateInstance(type);
 
-        var initMethod = sharedType.GetMethods()
+        var init = type.GetMethods()
             .FirstOrDefault(m => m.GetCustomAttribute<SharedContextInitializeAttribute>() != null);
 
-        if (initMethod != null)
-            await InvokeMethod(instance, initMethod);
+        if (init != null)
+            await Invoke(instance, init);
 
         return instance;
     }
 
-    private async Task CleanupSharedContext(object? sharedInstance)
+    private async Task DisposeSharedContext(object? instance)
     {
-        if (sharedInstance == null)
-            return;
+        if (instance == null) return;
 
-        var cleanupMethod = sharedInstance.GetType()
-            .GetMethods()
+        var cleanup = instance.GetType().GetMethods()
             .FirstOrDefault(m => m.GetCustomAttribute<SharedContextCleanupAttribute>() != null);
 
-        if (cleanupMethod != null)
-            await InvokeMethod(sharedInstance, cleanupMethod);
+        if (cleanup != null)
+            await Invoke(instance, cleanup);
     }
 
-    private async Task ExecuteTestClass(Type testClass, object? sharedInstance)
+    // ---------------- CLASS EXECUTION ----------------
+
+    private async Task RunTestClass(Type testClass, object? shared)
     {
-        var classInit = testClass.GetMethods()
-            .FirstOrDefault(m => m.GetCustomAttribute<ClassInitializeAttribute>() != null);
+        var methods = testClass.GetMethods();
 
-        var classCleanup = testClass.GetMethods()
-            .FirstOrDefault(m => m.GetCustomAttribute<ClassCleanupAttribute>() != null);
+        var classInit = methods.FirstOrDefault(m => m.GetCustomAttribute<ClassInitializeAttribute>() != null);
+        var classCleanup = methods.FirstOrDefault(m => m.GetCustomAttribute<ClassCleanupAttribute>() != null);
 
-        object? classInstanceForInit = CreateInstance(testClass, sharedInstance);
+        var instance = CreateInstance(testClass, shared);
 
         if (classInit != null)
-            await InvokeMethod(classInstanceForInit, classInit);
+            await Invoke(instance, classInit);
 
-        var testMethods = testClass.GetMethods()
+        var testMethods = methods
             .Where(m => m.GetCustomAttribute<TestMethodAttribute>() != null);
 
         foreach (var method in testMethods)
         {
-            await ExecuteTestMethod(testClass, method, sharedInstance);
+            await RunTestMethod(testClass, method, shared);
         }
 
         if (classCleanup != null)
-            await InvokeMethod(classInstanceForInit, classCleanup);
+            await Invoke(instance, classCleanup);
     }
 
-    private async Task ExecuteTestMethod(Type testClass, MethodInfo method, object? sharedInstance)
+    // ---------------- METHOD EXECUTION ----------------
+
+    private async Task RunTestMethod(Type testClass, MethodInfo method, object? shared)
     {
         var dataRows = method.GetCustomAttributes<DataRowAttribute>().ToList();
 
         if (!dataRows.Any())
         {
-            await ExecuteSingleTest(testClass, method, null, sharedInstance);
+            await RunSingle(testClass, method, null, shared);
+            return;
         }
-        else
-        {
-            foreach (var row in dataRows)
-            {
-                if (!string.IsNullOrWhiteSpace(row.IgnoreMessage))
-                {
-                    _ignored++;
-                    PrintIgnore(message: row.IgnoreMessage, methodName: method.Name);
-                    continue;
-                }
 
-                await ExecuteSingleTest(testClass, method, row.Values, sharedInstance);
+        foreach (var row in dataRows)
+        {
+            if (!string.IsNullOrWhiteSpace(row.IgnoreMessage))
+            {
+                _ignored++;
+                PrintIgnore(method.Name, row.IgnoreMessage);
+                continue;
             }
+
+            if (!ValidateParameters(method, row.Values, out string error))
+            {
+                _failed++;
+                PrintFail(method.Name, error);
+                continue;
+            }
+
+            await RunSingle(testClass, method, row.Values, shared);
         }
     }
 
-    private async Task ExecuteSingleTest(Type testClass, MethodInfo method, object[]? parameters, object? sharedInstance)
+    private async Task RunSingle(Type testClass, MethodInfo method, object[]? parameters, object? shared)
     {
-        object? instance = CreateInstance(testClass, sharedInstance);
+        var instance = CreateInstance(testClass, shared);
 
-        var setup = testClass.GetMethods()
-            .FirstOrDefault(m => m.GetCustomAttribute<SetUpAttribute>() != null);
-
-        var teardown = testClass.GetMethods()
-            .FirstOrDefault(m => m.GetCustomAttribute<TearDownAttribute>() != null);
+        var methods = testClass.GetMethods();
+        var setup = methods.FirstOrDefault(m => m.GetCustomAttribute<SetUpAttribute>() != null);
+        var teardown = methods.FirstOrDefault(m => m.GetCustomAttribute<TearDownAttribute>() != null);
 
         try
         {
-            if (setup != null)
-                await InvokeMethod(instance, setup);
+            if (setup != null) 
+            {
+                await Invoke(instance, setup);
+                Console.WriteLine("call");
+            }
 
-            await InvokeMethod(instance, method, parameters);
+            await Invoke(instance, method, parameters);
 
             _passed++;
-            PrintSuccess();
-            Console.WriteLine($"PASS: {method.DeclaringType?.Name}.{method.Name}");
+            PrintSuccess(method.Name);
         }
         catch (TestFailedException ex)
         {
             _failed++;
-            PrintFail(message: ex.Message, methodName: method.Name);
-            //Console.WriteLine($"FAIL: {method.Name} -> {ex.Message}");
+            PrintFail(method.Name, ex.Message);
         }
         catch (TestIgnoredException ex)
         {
             _ignored++;
-            PrintIgnore(message: ex.Message, methodName: method.Name);
-            //Console.WriteLine($"IGNORED: {method.Name} -> {ex.Message}");
+            PrintIgnore(method.Name, ex.Message);
         }
         catch (Exception ex)
         {
             _errors++;
-            PrintCriticalError(message: ex.InnerException?.Message ?? ex.Message, methodName: method.Name);
-            //Console.WriteLine($"ERROR: {method.Name} -> {ex.InnerException?.Message ?? ex.Message}");
+            PrintError(method.Name, ex.InnerException?.Message ?? ex.Message);
         }
         finally
         {
             if (teardown != null)
-                await InvokeMethod(instance, teardown);
+                await Invoke(instance, teardown);
         }
     }
 
-    private object? CreateInstance(Type testClass, object? sharedInstance)
+    // ---------------- VALIDATION ----------------
+
+    private bool ValidateParameters(MethodInfo method, object[] values, out string error)
     {
-        var constructor = testClass.GetConstructors().First();
+        var parameters = method.GetParameters();
 
-        var parameters = constructor.GetParameters();
-
-        if (sharedInstance != null &&
-            parameters.Length == 1 &&
-            parameters[0].ParameterType == sharedInstance.GetType())
+        if (values.Length != parameters.Length)
         {
-            return Activator.CreateInstance(testClass, sharedInstance);
+            error = $"Parameter count mismatch. Expected {parameters.Length}, got {values.Length}";
+            return false;
         }
 
-        return Activator.CreateInstance(testClass);
+        for (int i = 0; i < parameters.Length; i++)
+        {
+            if (values[i] == null) continue;
+
+            if (!parameters[i].ParameterType.IsAssignableFrom(values[i].GetType()))
+            {
+                error = $"Parameter type mismatch at index {i}";
+                return false;
+            }
+        }
+
+        error = string.Empty;
+        return true;
     }
 
-    private async Task InvokeMethod(object? instance, MethodInfo method, object[]? parameters = null)
+    // ---------------- UTIL ----------------
+
+    private object? CreateInstance(Type type, object? shared)
+    {
+        var ctor = type.GetConstructors().First();
+
+        var parameters = ctor.GetParameters();
+
+        if (shared != null &&
+            parameters.Length == 1 &&
+            parameters[0].ParameterType == shared.GetType())
+        {
+            return Activator.CreateInstance(type, shared);
+        }
+
+        return Activator.CreateInstance(type);
+    }
+
+    private async Task Invoke(object? instance, MethodInfo method, object[]? parameters = null)
     {
         var result = method.Invoke(instance, parameters);
 
         if (result is Task task)
             await task;
     }
-    
-    private void PrintSuccess(string? message = "PASSED")
-    {
-        var prevColor = Console.ForegroundColor;
-        Console.ForegroundColor = SuccessColor;
-        Console.Write(message + ": ");
-        Console.ForegroundColor = prevColor;
-    }
 
-    private void PrintCriticalError(string methodName, string message)
-    {
-        var prevColor = Console.ForegroundColor;
-        Console.ForegroundColor = CriticalErrorColor;
-        Console.Write($"ERROR: ");
-        Console.ForegroundColor = prevColor;
-        Console.WriteLine(methodName + " " + message);
-    }
-    
-    private void PrintIgnore(string methodName, string message)
-    {
-        var prevColor = Console.ForegroundColor;
-        Console.ForegroundColor = IgnoreColor;
-        Console.Write($"SKIPPED: ");
-        Console.ForegroundColor = prevColor;
-        Console.WriteLine(methodName + " " + message);
-    }
+    // ---------------- OUTPUT ----------------
 
-    private void PrintFail(string methodName, string message)
-    {
-        var prevColor = Console.ForegroundColor;
-        Console.ForegroundColor = TestErrorColor;
-        Console.Write($"FAILED: ");
-        Console.ForegroundColor = prevColor;
-        Console.WriteLine(methodName + " " + message);
-    }
+    private void PrintSuccess(string name)
+        => Console.WriteLine($"PASS: {name}");
+
+    private void PrintFail(string name, string message)
+        => Console.WriteLine($"FAIL: {name} -> {message}");
+
+    private void PrintIgnore(string name, string message)
+        => Console.WriteLine($"SKIP: {name} -> {message}");
+
+    private void PrintError(string name, string message)
+        => Console.WriteLine($"ERROR: {name} -> {message}");
 
     private void PrintSummary()
     {
-        Console.WriteLine();
-        Console.WriteLine("------ SUMMARY ------");
+        Console.WriteLine("\nSUMMARY");
         Console.WriteLine($"Passed:  {_passed}");
         Console.WriteLine($"Failed:  {_failed}");
         Console.WriteLine($"Ignored: {_ignored}");

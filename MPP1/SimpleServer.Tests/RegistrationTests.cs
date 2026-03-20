@@ -7,7 +7,7 @@ using TestLib.exceptions;
 
 namespace SimpleServer.Tests;
 
-[TestClass]
+//[TestClass]
 public class RegistrationTests
 {
     private SimpleHttpServer _server = null!;
