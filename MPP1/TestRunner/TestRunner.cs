@@ -1,4 +1,4 @@
-﻿﻿using System.Reflection;
+﻿using System.Reflection;
 using TestLib.attributes;
 using TestLib.exceptions;
 
@@ -68,10 +68,52 @@ public class TestRunner
     }
 
     // ---------------- CLASS EXECUTION ----------------
+    
+    private string FormatTestName(MethodInfo method, object[]? parameters)
+    {
+        if (parameters == null || parameters.Length == 0)
+            return method.Name;
+
+        var args = string.Join(", ", parameters.Select(p => p?.ToString() ?? "null"));
+        return $"{method.Name}({args})";
+    }
 
     private async Task RunTestClass(Type testClass, object? shared)
     {
+        var classIgnore = testClass.GetCustomAttribute<IgnoreAttribute>();
+
         var methods = testClass.GetMethods();
+        var testMethods = methods
+            .Where(m => m.GetCustomAttribute<TestMethodAttribute>() != null)
+            .ToList();
+
+        // --- IGNORE НА УРОВНЕ КЛАССА ---
+        if (classIgnore != null)
+        {
+            foreach (var method in testMethods)
+            {
+                var dataRows = method.GetCustomAttributes<DataRowAttribute>().ToList();
+
+                if (dataRows.Any())
+                {
+                    foreach (var row in dataRows)
+                    {
+                        _ignored++;
+                        PrintIgnore(
+                            FormatTestName(method, row.Values),
+                            classIgnore.Message ?? "Class ignored"
+                        );
+                    }
+                }
+                else
+                {
+                    _ignored++;
+                    PrintIgnore(method.Name, classIgnore.Message ?? "Class ignored");
+                }
+            }
+
+            return;
+        }
 
         var classInit = methods.FirstOrDefault(m => m.GetCustomAttribute<ClassInitializeAttribute>() != null);
         var classCleanup = methods.FirstOrDefault(m => m.GetCustomAttribute<ClassCleanupAttribute>() != null);
@@ -80,9 +122,6 @@ public class TestRunner
 
         if (classInit != null)
             await Invoke(instance, classInit);
-
-        var testMethods = methods
-            .Where(m => m.GetCustomAttribute<TestMethodAttribute>() != null);
 
         foreach (var method in testMethods)
         {
@@ -97,8 +136,34 @@ public class TestRunner
 
     private async Task RunTestMethod(Type testClass, MethodInfo method, object? shared)
     {
+        var methodIgnore = method.GetCustomAttribute<IgnoreAttribute>();
+
         var dataRows = method.GetCustomAttributes<DataRowAttribute>().ToList();
 
+        // --- IGNORE НА УРОВНЕ МЕТОДА ---
+        if (methodIgnore != null)
+        {
+            if (dataRows.Any())
+            {
+                foreach (var row in dataRows)
+                {
+                    _ignored++;
+                    PrintIgnore(
+                        FormatTestName(method, row.Values),
+                        methodIgnore.Message ?? "Method ignored"
+                    );
+                }
+            }
+            else
+            {
+                _ignored++;
+                PrintIgnore(method.Name, methodIgnore.Message ?? "Method ignored");
+            }
+
+            return;
+        }
+
+        // --- ОБЫЧНОЕ ВЫПОЛНЕНИЕ ---
         if (!dataRows.Any())
         {
             await RunSingle(testClass, method, null, shared);
@@ -107,17 +172,24 @@ public class TestRunner
 
         foreach (var row in dataRows)
         {
+            // --- IGNORE НА УРОВНЕ DataRow ---
             if (!string.IsNullOrWhiteSpace(row.IgnoreMessage))
             {
                 _ignored++;
-                PrintIgnore(method.Name, row.IgnoreMessage);
+                PrintIgnore(
+                    FormatTestName(method, row.Values),
+                    row.IgnoreMessage
+                );
                 continue;
             }
 
             if (!ValidateParameters(method, row.Values, out string error))
             {
                 _failed++;
-                PrintFail(method.Name, error);
+                PrintFail(
+                    FormatTestName(method, row.Values),
+                    error
+                );
                 continue;
             }
 
@@ -138,7 +210,7 @@ public class TestRunner
             if (setup != null) 
             {
                 await Invoke(instance, setup);
-                Console.WriteLine("call");
+                //Console.WriteLine("call");
             }
 
             await Invoke(instance, method, parameters);

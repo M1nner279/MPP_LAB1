@@ -10,18 +10,19 @@ namespace SimpleServer.Tests;
 public class DataRowTests
 {
     private SimpleHttpServer _server = null!;
-    private int setupCalls = 0;
+    //private int setupCalls = 0;
     
     [SetUp]
     public void Setup()
     {
         _server = new SimpleHttpServer();
-        setupCalls++;
+        //setupCalls++;
     }
     
     [TestMethod]
     [DataRow("/a", 200)] // test validation param
     [DataRow("/b", 404)]
+    [DataRow("/c", 500, IgnoreMessage = "Demonstration of ignored test")]
     public async Task UnknownRoutes_Return404(string path, int expected)
     {
         //var server = new SimpleHttpServer();
@@ -31,11 +32,12 @@ public class DataRowTests
 
         Assert.AreEqual(expected, response.StatusCode);
         Assert.IsFalse(response.StatusCode == 200);
-        Console.WriteLine(setupCalls);
+        //Console.WriteLine(setupCalls);
     }
 
     [TestMethod]
-    [DataRow(1, IgnoreMessage = "Demonstration of ignored test")]
+    [Ignore]
+    [DataRow(1)]
     public void IgnoredTest(int value)
     {
         Assert.IsTrue(value > 0);
