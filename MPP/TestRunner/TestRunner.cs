@@ -10,10 +10,8 @@ public class TestRunner
 {
     private static readonly object _consoleLock = new();
 
-    private readonly int _maxParallelism;
     private readonly int _maxThreads;
     private readonly int _minThreads;
-    private readonly SemaphoreSlim _semaphore;
 
     private readonly Dictionary<Type, object> _sharedContexts = new();
     private int _errors;
@@ -23,13 +21,10 @@ public class TestRunner
 
     private CustomThreadPool? _pool;
 
-    public TestRunner(int maxDegreeOfParallelism = 4)
-    {
-        _maxParallelism = maxDegreeOfParallelism;
-        _semaphore = new SemaphoreSlim(maxDegreeOfParallelism);
-    }
-
-    public TestRunner(int minThreads = 2, int maxThreads = 4)
+    // Конструктор по умолчанию
+    public TestRunner() : this(2, 4) { }
+    
+    public TestRunner(int minThreads, int maxThreads)
     {
         _minThreads = minThreads;
         _maxThreads = maxThreads;
@@ -39,25 +34,25 @@ public class TestRunner
     {
         _passed = _failed = _ignored = _errors = 0;
 
+        // [ВАЖНО] Инициализируем контексты ДО запуска тестов
         await InitializeRequiredContexts(assembly);
 
-        // Собираем все тестовые случаи из всех классов в один список
         var testCases = GetTestCases(assembly);
 
         SafePrint(() =>
-            Console.WriteLine(
-                $"Starting {(parallel ? "PARALLEL" : "SEQUENTIAL")} execution of {testCases.Count} tests...\n"));
-
+            Console.WriteLine($"\nStarting {(parallel ? "CUSTOM POOL" : "SEQUENTIAL")} execution of {testCases.Count} tests..."));
 
         var sw = Stopwatch.StartNew();
 
         if (parallel)
         {
-            _pool = new CustomThreadPool(_minThreads, _maxThreads, 5000);
-
+            _pool = new CustomThreadPool(_minThreads, _maxThreads, idleTimeoutMs: 5000);
             using var countdown = new CountdownEvent(testCases.Count);
 
             foreach (var tc in testCases)
+            {
+                await Task.Yield();
+
                 _pool.Enqueue(() =>
                 {
                     try
@@ -66,17 +61,18 @@ public class TestRunner
                     }
                     finally
                     {
+                        // Сигнал будет отправлен всегда, даже если тест "завис"
                         countdown.Signal();
                     }
                 });
+            }
 
+            // Ждем завершения всех тестов в отдельной задаче, чтобы не блокировать UI
             await Task.Run(() => countdown.Wait());
-            _pool.Dispose(); // Останавливаем пул после работы
-            
+            _pool.Dispose(); 
         }
         else
         {
-            // ПОСЛЕДОВАТЕЛЬНЫЙ ЗАПУСК
             foreach (var tc in testCases) await ExecuteTestCase(tc);
         }
 
@@ -94,7 +90,8 @@ public class TestRunner
             .Where(type => type != null)
             .Distinct();
 
-        foreach (var ctxType in contextTypes) await GetOrCreateSharedContextAsync(ctxType!);
+        foreach (var ctxType in contextTypes) 
+            await GetOrCreateSharedContextAsync(ctxType!);
     }
 
     private async Task<object> GetOrCreateSharedContextAsync(Type contextType)
@@ -107,13 +104,13 @@ public class TestRunner
         var instance = Activator.CreateInstance(contextType)!;
         var init = contextType.GetMethods()
             .FirstOrDefault(m => m.GetCustomAttribute<SharedContextInitializeAttribute>() != null);
+        
         if (init != null) await Invoke(instance, init);
 
         lock (_sharedContexts)
         {
             _sharedContexts[contextType] = instance;
         }
-
         return instance;
     }
 
@@ -137,13 +134,11 @@ public class TestRunner
                     list.Add(new TestCase(@class, method, null, null));
             }
         }
-
         return list;
     }
 
     private async Task ExecuteTestCase(TestCase tc)
     {
-        // 1. Проверка Ignore
         var methodIgnore = tc.Method.GetCustomAttribute<IgnoreAttribute>();
         if (methodIgnore != null || tc.DataRowIgnoreMessage != null)
         {
@@ -153,11 +148,7 @@ public class TestRunner
             return;
         }
 
-        // 2. Валидация
-        try
-        {
-            ValidateMethodSignature(tc.Method);
-        }
+        try { ValidateMethodSignature(tc.Method); }
         catch (Exception ex)
         {
             Interlocked.Increment(ref _errors);
@@ -165,30 +156,25 @@ public class TestRunner
             return;
         }
 
-        // 3. Запуск с учетом Timeout
         var timeoutAttr = tc.Method.GetCustomAttribute<TimeoutAttribute>();
-        var timeoutMs = timeoutAttr?.Milliseconds ?? -1;
+
+        var timeoutMs = timeoutAttr?.Milliseconds ?? 3000; 
 
         using var cts = new CancellationTokenSource();
         var executionTask = RunSingle(tc);
+        var timeoutTask = Task.Delay(timeoutMs, cts.Token);
+        
+        var finishedTask = await Task.WhenAny(executionTask, timeoutTask);
 
-        if (timeoutMs > 0)
+        if (finishedTask == timeoutTask)
         {
-            var timeoutTask = Task.Delay(timeoutMs, cts.Token);
-            var finishedTask = await Task.WhenAny(executionTask, timeoutTask);
-
-            if (finishedTask == timeoutTask)
-            {
-                // атомарная операция
-                Interlocked.Increment(ref _failed);
-                SafePrint(() => PrintFail(FormatTestName(tc.Method, tc.Parameters), $"Timed out after {timeoutMs}ms"));
-                return;
-            }
-
-            cts.Cancel();
+            Interlocked.Increment(ref _failed);
+            SafePrint(() => PrintFail(FormatTestName(tc.Method, tc.Parameters), $"Timed out after {timeoutMs}ms (Thread abandoned)"));
+            return; 
         }
 
-        await executionTask;
+        cts.Cancel(); // Тест успел, отменяем таймер
+        await executionTask; // Прокидываем ошибки если были
     }
 
     private async Task RunSingle(TestCase tc)
@@ -203,6 +189,8 @@ public class TestRunner
 
             if (setup != null) await Invoke(instance, setup);
             
+            // [ИЗМЕНЕНО] Вызываем Invoke через Task.Run, чтобы бесконечные циклы в тестах 
+            // не блокировали поток, отвечающий за мониторинг таймаута.
             var testTask = Task.Run(() => tc.Method.Invoke(instance, tc.Parameters));
             var result = await testTask; 
 
@@ -213,35 +201,25 @@ public class TestRunner
             Interlocked.Increment(ref _passed);
             SafePrint(() => PrintSuccess(FormatTestName(tc.Method, tc.Parameters)));
         }
-
-        catch (TestFailedException fe)
-        {
-            Interlocked.Increment(ref _failed);
-            SafePrint(() => PrintFail(FormatTestName(tc.Method, tc.Parameters), fe.Message));
-        }
-
-        catch (TestIgnoredException ie)
-        {
-            Interlocked.Increment(ref _ignored);
-            SafePrint(() => PrintIgnore(FormatTestName(tc.Method, tc.Parameters), ie.Message));
-        }
-
-        catch (TargetInvocationException ex) when (ex.InnerException is TestFailedException fe)
-        {
-            Interlocked.Increment(ref _failed);
-            SafePrint(() => PrintFail(FormatTestName(tc.Method, tc.Parameters), fe.Message));
-        }
-        catch (TargetInvocationException ex) when (ex.InnerException is TestIgnoredException ie)
-        {
-            Interlocked.Increment(ref _ignored);
-            SafePrint(() => PrintIgnore(FormatTestName(tc.Method, tc.Parameters), ie.Message));
-        }
-
         catch (Exception ex)
         {
-            Interlocked.Increment(ref _errors);
-            SafePrint(() =>
-                PrintError(FormatTestName(tc.Method, tc.Parameters), ex.InnerException?.Message ?? ex.Message));
+            var actualEx = ex is TargetInvocationException ? ex.InnerException : ex;
+
+            if (actualEx is TestFailedException fe)
+            {
+                Interlocked.Increment(ref _failed);
+                SafePrint(() => PrintFail(FormatTestName(tc.Method, tc.Parameters), fe.Message));
+            }
+            else if (actualEx is TestIgnoredException ie)
+            {
+                Interlocked.Increment(ref _ignored);
+                SafePrint(() => PrintIgnore(FormatTestName(tc.Method, tc.Parameters), ie.Message));
+            }
+            else
+            {
+                Interlocked.Increment(ref _errors);
+                SafePrint(() => PrintError(FormatTestName(tc.Method, tc.Parameters), actualEx?.Message ?? "Unknown Error"));
+            }
         }
     }
 
@@ -252,28 +230,13 @@ public class TestRunner
         var sharedContextAttr = type.GetCustomAttribute<SharedContextAttribute>();
         if (sharedContextAttr != null)
         {
-            var context = GetOrCreateSharedContext(sharedContextAttr.ContextType);
-            var ctor = type.GetConstructor(new[] { sharedContextAttr.ContextType });
-            if (ctor != null) return ctor.Invoke(new[] { context });
+            if (_sharedContexts.TryGetValue(sharedContextAttr.ContextType, out var context))
+            {
+                var ctor = type.GetConstructor(new[] { sharedContextAttr.ContextType });
+                if (ctor != null) return ctor.Invoke(new[] { context });
+            }
         }
-
         return Activator.CreateInstance(type) ?? throw new Exception("Null instance");
-    }
-
-    private object GetOrCreateSharedContext(Type contextType)
-    {
-        lock (_sharedContexts) // Синхронизация создания контекста
-        {
-            if (_sharedContexts.TryGetValue(contextType, out var ctx)) return ctx;
-
-            var instance = Activator.CreateInstance(contextType)!;
-            var init = contextType.GetMethods()
-                .FirstOrDefault(m => m.GetCustomAttribute<SharedContextInitializeAttribute>() != null);
-            if (init != null) Invoke(instance, init).GetAwaiter().GetResult();
-
-            _sharedContexts[contextType] = instance;
-            return instance;
-        }
     }
 
     private async Task CleanupSharedContexts()
@@ -303,13 +266,9 @@ public class TestRunner
         return parameters == null ? method.Name : $"{method.Name}({string.Join(", ", parameters)})";
     }
 
-    // ---------------- ВЫВОД ----------------
     private void SafePrint(Action action)
     {
-        lock (_consoleLock)
-        {
-            action();
-        }
+        lock (_consoleLock) { action(); }
     }
 
     private void PrintSuccess(string name)
