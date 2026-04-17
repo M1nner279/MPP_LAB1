@@ -34,7 +34,6 @@ public class TestRunner
     {
         _passed = _failed = _ignored = _errors = 0;
 
-        // [ВАЖНО] Инициализируем контексты ДО запуска тестов
         await InitializeRequiredContexts(assembly);
 
         var testCases = GetTestCases(assembly);
@@ -148,7 +147,11 @@ public class TestRunner
             return;
         }
 
-        try { ValidateMethodSignature(tc.Method); }
+        try
+        {
+            ValidateMethodSignature(tc.Method);
+            ValidateParameters(tc.Method, tc.Parameters);
+        }
         catch (Exception ex)
         {
             Interlocked.Increment(ref _errors);
@@ -174,7 +177,7 @@ public class TestRunner
         }
 
         cts.Cancel(); // Тест успел, отменяем таймер
-        await executionTask; // Прокидываем ошибки если были
+        await executionTask;
     }
 
     private async Task RunSingle(TestCase tc)
@@ -261,6 +264,17 @@ public class TestRunner
             throw new InvalidTestSignatureException("Must return void or Task");
     }
 
+    private void ValidateParameters(MethodInfo method, object[]? values)
+    {
+        var parameters = method.GetParameters();
+        int valuesCount = values?.Length ?? 0;
+
+        if (parameters.Length != valuesCount)
+        {
+            throw new Exception($"Parameter count mismatch. Expected {parameters.Length}, got {valuesCount}");
+        }
+    }
+    
     private string FormatTestName(MethodInfo method, object[]? parameters)
     {
         return parameters == null ? method.Name : $"{method.Name}({string.Join(", ", parameters)})";

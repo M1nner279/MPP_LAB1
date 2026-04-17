@@ -18,6 +18,7 @@ public class RouteTests
     }
 
     [TestMethod]
+    [Timeout(200)]
     public async Task Ping_ReturnsPong()
     {
         var response = await _context.Server.RouteAsync(

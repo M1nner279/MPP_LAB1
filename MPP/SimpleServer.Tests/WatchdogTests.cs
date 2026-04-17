@@ -4,6 +4,7 @@ using TestLib.attributes;
 namespace SimpleServer.Tests;
 
 [TestClass]
+[Ignore]
 public class WatchdogTests
 {
     [TestMethod]
